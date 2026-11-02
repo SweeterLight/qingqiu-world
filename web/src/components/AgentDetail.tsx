@@ -314,7 +314,15 @@ const AgentDetail: React.FC<AgentDetailProps> = ({ agent, onUpdated }) => {
                 <div className="agent-detail-name"><span>{t('agent.name')}</span><strong>{agent.name}</strong></div>
                 <Form.Item name="character_settings" label={t('agent.characterSettings')}><Input.TextArea rows={6} placeholder={t('agent.characterSettingsPlaceholder')} /></Form.Item>
                 <Form.Item name="llm_config_id" label={t('agent.llmConfigId')} rules={[{ required: true, message: t('agent.llmConfigIdPlaceholder') }]}>
-                  <Select placeholder={t('agent.llmConfigIdPlaceholder')} options={llmConfigs.map(config => ({ value: config.id, label: config.name }))} />
+                  <Select placeholder={t('agent.llmConfigIdPlaceholder')} onOpenChange={(open) => {
+                    if (open) void llmConfigApi.list().then(response => setLLMConfigs(response.data)).catch(error => {
+                      logger.error('Failed to refresh LLM configs', error);
+                    });
+                  }} options={llmConfigs.map(config => ({
+                    value: config.id,
+                    label: config.probe.status === 'passed' ? config.name : `${config.name} (${t('llmConfig.assignmentUnavailable')})`,
+                    disabled: config.probe.status !== 'passed' && config.id !== agent.llm_config_id,
+                  }))} />
                 </Form.Item>
                 <div className="agent-detail-save-action">
                   <Button type="primary" htmlType="submit" icon={<SaveOutlined />} loading={savingBasic} disabled={!basicDirty}>{t('agent.saveBasic')}</Button>

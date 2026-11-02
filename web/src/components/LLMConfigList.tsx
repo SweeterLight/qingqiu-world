@@ -32,6 +32,38 @@ export default function LLMConfigList({ onSelectConfig, showCreate, onCreateClos
   const { t } = useTranslation();
   // Singleton backend config: the llm_config_id currently acting as system LLM.
   const [systemLLMId, setSystemLLMId] = useState<number | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [probingID, setProbingID] = useState<number | null>(null);
+
+  const probeDetails = (config: LLMConfig) => config.probe.status === 'unverified'
+    ? t('llmConfig.notTested')
+    : [
+      `${t('llmConfig.requiredTools')}: ${config.probe.required_tools.ok ? t('llmConfig.probe_passed') : config.probe.required_tools.error || t('llmConfig.probe_failed')}`,
+      `${t('llmConfig.structuredOutput')}: ${config.probe.structured_output.ok ? t('llmConfig.probe_passed') : config.probe.structured_output.error || t('llmConfig.probe_failed')}`,
+      config.probe.checked_at && `${t('llmConfig.checkedAt')}: ${new Date(config.probe.checked_at).toLocaleString()}`,
+    ].filter(Boolean).join('\n');
+
+  const showProbeWarning = (config: LLMConfig) => {
+    if (config.probe.status !== 'passed') {
+      message.warning(`${t('llmConfig.probeFailed')} ${probeDetails(config)}`, 8);
+    }
+  };
+
+  const handleRetest = async (id: number) => {
+    setProbingID(id);
+    try {
+      const { data } = await llmConfigApi.probe(id);
+      setRefreshKey(value => value + 1);
+      onConfigChanged?.();
+      if (data.probe.status === 'passed') message.success(t('llmConfig.probePassed'));
+      else showProbeWarning(data);
+    } catch (error) {
+      logger.error('Failed to retest LLM config', error);
+      message.error(t('llmConfig.probeRequestFailed'));
+    } finally {
+      setProbingID(null);
+    }
+  };
 
   // Load which config currently acts as the system LLM. Reused on mount and
   // after creating the first LLM config (the backend auto-promotes it, so the
@@ -74,6 +106,8 @@ export default function LLMConfigList({ onSelectConfig, showCreate, onCreateClos
       showCreate={showCreate}
       onCreateClose={onCreateClose}
       onConfigChanged={onConfigChanged}
+      onSaved={showProbeWarning}
+      refreshKey={refreshKey}
       onCreated={(_created, configs) => {
         // Soft constraint: only the first config can be auto-promoted to the
         // system LLM by the backend, so re-query the system config only in
@@ -81,22 +115,24 @@ export default function LLMConfigList({ onSelectConfig, showCreate, onCreateClos
         if (configs.length === 1) fetchSystemLLMId();
       }}
       beforeDelete={beforeDelete}
-      renderMeta={(config) => config.id === systemLLMId ? (
-        <Tag color="gold" style={{ fontSize: 11 }}>{t('llmConfig.systemTag')}</Tag>
-      ) : null}
-      renderExtraAction={(config) => config.id === systemLLMId ? null : (
-        // antd Tooltip instead of the native title attribute — browsers delay
-        // native tooltips by ~1s and that delay is not configurable.
-        <Tooltip title={t('llmConfig.setSystemTitle')}>
-          <button
-            className="item-card-action-btn"
-            style={{ fontSize: 13, fontWeight: 700 }}
-            onClick={(e) => { e.stopPropagation(); handleSetSystem(config.id); }}
-          >
-            S
-          </button>
+      renderMeta={(config) => <>
+        {config.id === systemLLMId && <Tag color="gold" style={{ fontSize: 11 }}>{t('llmConfig.systemTag')}</Tag>}
+        <Tooltip title={probeDetails(config)}>
+          <Tag color={config.probe.status === 'passed' ? 'green' : config.probe.status === 'failed' ? 'red' : 'default'}>
+            {t(`llmConfig.probe_${config.probe.status}`)}
+          </Tag>
         </Tooltip>
-      )}
+      </>}
+      renderExtraAction={(config) => <>
+        {config.id !== systemLLMId && <Tooltip title={t('llmConfig.setSystemTitle')}>
+          <button className="item-card-action-btn" style={{ fontSize: 13, fontWeight: 700 }}
+            onClick={(e) => { e.stopPropagation(); handleSetSystem(config.id); }}>S</button>
+        </Tooltip>}
+        <Tooltip title={t('llmConfig.retest')}>
+          <button className="item-card-action-btn" disabled={probingID === config.id}
+            onClick={(e) => { e.stopPropagation(); void handleRetest(config.id); }}>↻</button>
+        </Tooltip>
+      </>}
     />
   );
 }

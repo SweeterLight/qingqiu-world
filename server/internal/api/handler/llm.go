@@ -2,11 +2,13 @@ package handler
 
 import (
 	"qingqiu-world-server/internal/api/response"
+	"qingqiu-world-server/internal/database"
 	"qingqiu-world-server/internal/dops"
 	applogger "qingqiu-world-server/internal/logger"
 	"qingqiu-world-server/internal/model"
 	"qingqiu-world-server/internal/schema"
 	"qingqiu-world-server/internal/service/agent"
+	"qingqiu-world-server/internal/service/llm"
 	"strconv"
 	"strings"
 
@@ -26,12 +28,14 @@ func (h *Handler) CreateLLMConfig(c *gin.Context) {
 		BaseURL:     req.BaseURL,
 		APIKey:      req.APIKey,
 		Description: derefString(req.Description),
+		ProbeStatus: "unverified",
 	}
+	entity.ProbeConfigHash = entity.ProbeFingerprint()
 	if err := dops.CreateLLMConfig(&entity); err != nil {
 		response.InternalError(c, err.Error())
 		return
 	}
-	response.Success(c, schema.NewLLMConfigResponse(&entity))
+	response.Success(c, schema.NewLLMConfigResponse(probeAndLoadLLMConfig(c, &entity)))
 }
 
 // ListLLMConfigs handles listing all LLM configurations.
@@ -71,18 +75,87 @@ func (h *Handler) UpdateLLMConfig(c *gin.Context) {
 	}
 	updates := req.BuildUpdates()
 	if len(updates) > 0 {
-		dops.Update(entity, updates)
+		if value, ok := updates["model_id"]; ok {
+			entity.ModelID = value.(string)
+		}
+		if value, ok := updates["base_url"]; ok {
+			entity.BaseURL = value.(string)
+		}
+		if value, ok := updates["api_key"]; ok {
+			entity.APIKey = value.(string)
+		}
+		updates["probe_config_hash"] = entity.ProbeFingerprint()
+		updates["probe_status"] = "unverified"
+		updates["probe_required_tools_ok"] = false
+		updates["probe_required_tools_error"] = ""
+		updates["probe_structured_output_ok"] = false
+		updates["probe_structured_output_error"] = ""
+		updates["probe_checked_at"] = nil
+		if err := database.DB.Model(&model.LLMConfig{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			response.InternalError(c, "Failed to update LLM config")
+			return
+		}
 		// Invalidate cached agents that reference this LLM config.
 		if refs, err := dops.ListAgentConfigsByLLMConfigID(id); err == nil {
 			for _, ac := range refs {
 				agent.Refresh(ac.PersonID)
 			}
 		}
-		if entity, err = dops.GetLLMConfig(id); err != nil {
-			applogger.Error("failed to refresh LLM config after update", "id", id, "error", err)
+		entity, err = dops.GetLLMConfig(id)
+		if err != nil {
+			response.InternalError(c, "Failed to load LLM config after update")
+			return
 		}
 	}
+	entity = probeAndLoadLLMConfig(c, entity)
 	response.Success(c, schema.NewLLMConfigResponse(entity))
+}
+
+// ProbeLLMConfig repeats the live protocol check after a transient failure or repair.
+func (h *Handler) ProbeLLMConfig(c *gin.Context) {
+	id := getPathID(c)
+	entity, err := dops.GetLLMConfig(id)
+	if err != nil {
+		handleNotFound(c, "LLM config", id)
+		return
+	}
+	response.Success(c, schema.NewLLMConfigResponse(probeAndLoadLLMConfig(c, entity)))
+}
+
+func probeAndLoadLLMConfig(c *gin.Context, entity *model.LLMConfig) *model.LLMConfig {
+	fingerprint := entity.ProbeFingerprint()
+	if entity.ProbeConfigHash != fingerprint {
+		claim := database.DB.Model(&model.LLMConfig{}).
+			Where("id = ? AND probe_config_hash = ?", entity.ID, entity.ProbeConfigHash).
+			UpdateColumns(map[string]interface{}{"probe_config_hash": fingerprint, "probe_status": "unverified"})
+		if claim.Error != nil || claim.RowsAffected == 0 {
+			applogger.Error("failed to prepare LLM config probe", "id", entity.ID, "error", claim.Error)
+			refreshed, err := dops.GetLLMConfig(entity.ID)
+			if err == nil {
+				return refreshed
+			}
+			return entity
+		}
+	}
+	result := llm.Probe(c.Request.Context(), entity.BaseURL, entity.APIKey, entity.ModelID)
+	updates := map[string]interface{}{
+		"probe_status":                  result.Status,
+		"probe_required_tools_ok":       result.RequiredTools.OK,
+		"probe_required_tools_error":    result.RequiredTools.Error,
+		"probe_structured_output_ok":    result.StructuredOutput.OK,
+		"probe_structured_output_error": result.StructuredOutput.Error,
+		"probe_checked_at":              result.CheckedAt,
+	}
+	query := database.DB.Model(&model.LLMConfig{}).Where("id = ? AND probe_config_hash = ?", entity.ID, fingerprint).UpdateColumns(updates)
+	if query.Error != nil {
+		applogger.Error("failed to persist LLM probe result", "id", entity.ID, "error", query.Error)
+	}
+	refreshed, err := dops.GetLLMConfig(entity.ID)
+	if err != nil {
+		applogger.Error("failed to reload LLM config after probe", "id", entity.ID, "error", err)
+		return entity
+	}
+	return refreshed
 }
 
 // DeleteLLMConfig handles deleting an LLM configuration.

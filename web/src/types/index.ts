@@ -49,6 +49,12 @@ export interface LLMConfig {
   base_url: string;
   api_key: string;
   description: string;
+  probe: {
+    status: 'unverified' | 'passed' | 'failed';
+    required_tools: { ok: boolean; error?: string };
+    structured_output: { ok: boolean; error?: string };
+    checked_at: string | null;
+  };
   created_at: string;
   updated_at: string | null;
 }
